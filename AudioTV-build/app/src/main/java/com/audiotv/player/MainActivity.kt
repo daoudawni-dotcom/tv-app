@@ -22,6 +22,8 @@ import android.os.Looper
 import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.view.KeyEvent
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
@@ -30,7 +32,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -46,7 +47,7 @@ class MainActivity : Activity() {
     )
 
     private lateinit var player: ExoPlayer
-    private lateinit var playerView: PlayerView
+    private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
     private lateinit var artwork: ImageView
     private lateinit var list: ListView
@@ -57,6 +58,7 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private var current = -1
     private var pendingCoverTargetIndex = -1
+    private var surfaceReady = false
     private var hasVideoTrack = false
 
     private val mediaExts = setOf(
@@ -95,13 +97,32 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
         })
 
-        playerView = PlayerView(this).apply {
-            this.player = this@MainActivity.player
-            useController = true
+        surfaceView = SurfaceView(this).apply {
             visibility = View.GONE
-            setBackgroundColor(Color.BLACK)
+            holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    surfaceReady = true
+                    if (hasVideoTrack) {
+                        player.setVideoSurfaceHolder(holder)
+                    }
+                }
+
+                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                    surfaceReady = true
+                    if (hasVideoTrack) {
+                        player.setVideoSurfaceHolder(holder)
+                    }
+                }
+
+                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                    surfaceReady = false
+                    if (::player.isInitialized) {
+                        player.clearVideoSurfaceHolder(holder)
+                    }
+                }
+            })
         }
-        root.addView(playerView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 320))
+        root.addView(surfaceView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 320))
 
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -173,7 +194,15 @@ class MainActivity : Activity() {
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 val hasVid = videoSize.width > 0 && videoSize.height > 0
                 hasVideoTrack = hasVid
-                playerView.visibility = if (hasVid) View.VISIBLE else View.GONE
+                if (hasVid) {
+                    surfaceView.visibility = View.VISIBLE
+                    if (surfaceReady) {
+                        player.setVideoSurfaceHolder(surfaceView.holder)
+                    }
+                } else {
+                    surfaceView.visibility = View.GONE
+                    player.clearVideoSurface()
+                }
             }
 
             override fun onPlaybackStateChanged(state: Int) {
@@ -269,7 +298,7 @@ class MainActivity : Activity() {
                     labels.add(if (img != null) "📂🖼 ${f.name}" else "📂 ${f.name}")
                 } else {
                     val prefix = if (selectCoverMode) "🖼" else if (isVideoFile(f)) "🎬" else "🎵"
-                    labels.add("$prefix ${f.name}")
+                    labels.add("$prefix${f.name}")
                 }
             }
 
@@ -482,7 +511,7 @@ class MainActivity : Activity() {
                     "حذف من القائمة" -> {
                         if (current == index) {
                             player.stop()
-                            playerView.visibility = View.GONE
+                            surfaceView.visibility = View.GONE
                             current = -1
                         } else if (current > index) {
                             current--
@@ -670,7 +699,8 @@ class MainActivity : Activity() {
 
         val resumeMs = forceStartMs ?: prefs.getLong("pos:$uriStr", 0L).coerceAtLeast(0L)
         hasVideoTrack = false
-        playerView.visibility = View.GONE
+        surfaceView.visibility = View.GONE
+        player.clearVideoSurface()
 
         player.setMediaItem(MediaItem.fromUri(item.uri))
         player.prepare()
@@ -708,7 +738,7 @@ class MainActivity : Activity() {
             updateHeaderArtwork(items[idx])
             if (savedPos > 1000L) {
                 val sec = savedPos / 1000
-                status.text = "محفوظ عند ${sec / 60}:${String.format("%02d", sec % 60)} — ${items[idx].title}"
+                status.text = "محفوظ عند ${sec / 60}:${String.format("\%02d", sec \% 60)} — ${items[idx].title}"
             }
         }
     }
@@ -816,104 +846,4 @@ class MainActivity : Activity() {
                         contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     } catch (_: Exception) {
                     }
-                    addFileItem(uri)
-                }
-                saveLibrary()
-            }
-            20 -> data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { command(it) }
-        }
-    }
-
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_VOICE_ASSIST, KeyEvent.KEYCODE_SEARCH -> {
-                    voice()
-                    return true
-                }
-                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                    toggle()
-                    return true
-                }
-                KeyEvent.KEYCODE_MEDIA_NEXT -> {
-                    next()
-                    return true
-                }
-            }
-        }
-        return super.dispatchKeyEvent(event)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        handler.post(saveTick)
-    }
-
-    override fun onStop() {
-        handler.removeCallbacks(saveTick)
-        savePosition()
-        super.onStop()
-    }
-
-    override fun onPause() {
-        savePosition()
-        super.onPause()
-    }
-
-    override fun onDestroy() {
-        handler.removeCallbacks(saveTick)
-        savePosition()
-        player.release()
-        super.onDestroy()
-    }
-
-    private inner class LibraryAdapter : BaseAdapter() {
-        override fun getCount(): Int = items.size
-        override fun getItem(position: Int): Any = items[position]
-        override fun getItemId(position: Int): Long = position.toLong()
-
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val item = items[position]
-            val row = (convertView as? LinearLayout) ?: LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(12, 10, 12, 10)
-            }
-            row.removeAllViews()
-
-            val img = ImageView(this@MainActivity).apply {
-                layoutParams = LinearLayout.LayoutParams(76, 76)
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                setImageDrawable(loadItemDrawable(item))
-            }
-
-            val uriStr = item.uri.toString()
-            val savedMs = if (!item.isFolder) prefs.getLong("pos:$uriStr", 0L) else 0L
-            val isPlayed = if (!item.isFolder) prefs.getBoolean("played:$uriStr", false) else false
-
-            val posTag = if (savedMs > 1000L) {
-                val sec = savedMs / 1000
-                " [${sec / 60}:${String.format("%02d", sec % 60)}]"
-            } else {
-                ""
-            }
-            val playedTag = if (!item.isFolder && isPlayed) "  • ✓ تم تشغيله" else ""
-
-            val tv = TextView(this@MainActivity).apply {
-                text = item.title + posTag + playedTag
-                textSize = 17f
-                setTextColor(
-                    when {
-                        position == current -> 0xff66d9ef.toInt()
-                        isPlayed -> 0xffa6e22e.toInt()
-                        else -> Color.WHITE
-                    }
-                )
-                setPadding(16, 12, 8, 12)
-            }
-
-            row.addView(img)
-            row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            return row
-        }
-    }
-}
+                    add
