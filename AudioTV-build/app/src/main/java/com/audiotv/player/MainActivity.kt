@@ -321,12 +321,11 @@ class MainActivity : Activity() {
 
     private fun openFolderBrowser(selectCoverMode: Boolean, startDir: File? = null) {
         val roots = getStorageRoots()
-        var currentDir = startDir?.takeIf { it.exists() && it.isDirectory }
+        val initialDir = startDir?.takeIf { it.exists() && it.isDirectory }
             ?: roots.firstOrNull()
             ?: Environment.getExternalStorageDirectory()
 
         fun showDirDialog(dir: File) {
-            currentDir = dir
             val entries = dir.listFiles()?.sortedWith(
                 compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase() }
             )?.filter { file ->
@@ -398,7 +397,7 @@ class MainActivity : Activity() {
                 .show()
         }
 
-        showDirDialog(currentDir)
+        showDirDialog(initialDir)
     }
 
     private fun getStorageRoots(): List<File> {
@@ -599,9 +598,8 @@ class MainActivity : Activity() {
         item.coverPath?.let { path ->
             val f = File(path)
             if (f.exists()) {
-                decodeSampledBitmap(f.absolutePath, 140, 140)?.let {
-                    return BitmapDrawable(resources, it)
-                }
+                val bmp = decodeSampledBitmap(f.absolutePath, 140, 140)
+                if (bmp != null) return BitmapDrawable(resources, bmp)
             }
         }
         if (!item.isFolder) {
@@ -952,78 +950,5 @@ class MainActivity : Activity() {
         savePosition()
         player.release()
         super.onDestroy()
-    }
-
-    private fun defaultDrawable(isFolder: Boolean): Drawable {
-        val size = 96
-        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        canvas.drawColor(if (isFolder) 0xff284363.toInt() else 0xff1f344d.toInt())
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 36f
-            textAlign = Paint.Align.CENTER
-        }
-        val tag = if (isFolder) "DIR" else "AV"
-        canvas.drawText(tag, size / 2f, size * 0.62f, paint)
-        return BitmapDrawable(resources, bmp)
-    }
-
-    private fun updateHeaderArtwork(item: LibraryItem?) {
-        if (item == null) {
-            artwork.setImageDrawable(defaultDrawable(isFolder = false))
-            return
-        }
-        artwork.setImageDrawable(loadItemDrawable(item))
-    }
-
-    private fun loadItemDrawable(item: LibraryItem): Drawable {
-        item.coverPath?.let { path ->
-            val f = File(path)
-            if (f.exists()) {
-                decodeSampledBitmap(f.absolutePath, 140, 140)?.let {
-                    return BitmapDrawable(resources, it)
-                }
-            }
-        }
-        if (!item.isFolder) {
-            try {
-                val retriever = MediaMetadataRetriever()
-                if (item.uri.scheme == "file" && item.uri.path != null) {
-                    retriever.setDataSource(item.uri.path)
-                } else {
-                    retriever.setDataSource(this, item.uri)
-                }
-                val art = retriever.embeddedPicture
-                if (art != null) {
-                    retriever.release()
-                    val bmp = BitmapFactory.decodeByteArray(art, 0, art.size)
-                    if (bmp != null) return BitmapDrawable(resources, bmp)
-                }
-                val frame = if (Build.VERSION.SDK_INT >= 27) {
-                    retriever.getScaledFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 140, 140)
-                } else {
-                    retriever.frameAtTime
-                }
-                retriever.release()
-                if (frame != null) return BitmapDrawable(resources, frame)
-            } catch (_: Exception) {
-            }
-        }
-        return defaultDrawable(item.isFolder)
-    }
-
-    private fun decodeSampledBitmap(path: String, reqW: Int, reqH: Int): Bitmap? {
-        return try {
-            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(path, opts)
-            var sample = 1
-            while (opts.outHeight / sample > reqH * 2 || opts.outWidth / sample > reqW * 2) {
-                sample *= 2
-            }
-            BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
-        } catch (_: Exception) {
-            null
-        }
     }
 }
