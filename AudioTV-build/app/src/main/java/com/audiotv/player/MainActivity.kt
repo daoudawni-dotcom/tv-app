@@ -1,57 +1,919 @@
 package com.audiotv.player
 
+import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.*
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 
 class MainActivity : Activity() {
+
+    private data class LibraryItem(
+        val uri: Uri,
+        val title: String,
+        val isFolder: Boolean = false,
+        val folderPath: String? = null,
+        var coverPath: String? = null
+    )
+
     private lateinit var player: ExoPlayer
+    private lateinit var playerView: PlayerView
     private lateinit var status: TextView
+    private lateinit var artwork: ImageView
     private lateinit var list: ListView
-    private lateinit var adapter: ArrayAdapter<String>
-    private val files = mutableListOf<Uri>()
-    private val names = mutableListOf<String>()
+    private lateinit var adapter: LibraryAdapter
+
+    private val items = mutableListOf<LibraryItem>()
     private val prefs by lazy { getSharedPreferences("library", MODE_PRIVATE) }
+    private val handler = Handler(Looper.getMainLooper())
     private var current = -1
+    private var pendingCoverTargetIndex = -1
+    private var hasVideoTrack = false
+
+    private val mediaExts = setOf(
+        // صوت
+        "mp3", "m4a", "aac", "wav", "ogg", "flac", "wma", "opus", "amr", "m4b", "aiff", "alac",
+        // فيديو
+        "mp4", "mkv", "webm", "m4v", "3gp", "avi", "mov", "ts", "m2ts", "flv", "vob", "mpg", "mpeg"
+    )
+    private val imageExts = setOf("jpg", "jpeg", "png", "webp", "bmp", "gif")
+
+    private val saveTick = object : Runnable {
+        override fun run() {
+            if (::player.isInitialized && player.isPlaying) {
+                savePosition()
+            }
+            handler.postDelayed(this, 4000L)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ensureStoragePermission()
+
         player = ExoPlayer.Builder(this).build()
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(30,20,30,20); layoutDirection = View.LAYOUT_DIRECTION_RTL; setBackgroundColor(0xff101b28.toInt()) }
-        root.addView(TextView(this).apply { text = "مكتبتي الصوتية | نسخة اختبار"; textSize = 26f; setTextColor(-1) })
-        status = TextView(this).apply { text = "أضف ملفات صوتية أو اختبر زر المايك"; textSize = 18f; setTextColor(-1) }; root.addView(status)
-        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }; root.addView(controls)
-        fun button(label: String, action: () -> Unit) { controls.addView(Button(this).apply { text = label; isFocusable = true; setOnClickListener { action() } }, LinearLayout.LayoutParams(0,-2,1f)) }
-        button("إضافة ملفات") { pick() }; button("أمر صوتي") { voice() }; button("فحص المايك") { startActivityForResult(Intent(this, MicActivity::class.java), 30) }; button("تشغيل / توقف") { toggle() }; button("التالي") { next() }
-        list = ListView(this); adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, names); list.adapter = adapter; list.setOnItemClickListener { _,_,position,_ -> play(position) }; root.addView(list,LinearLayout.LayoutParams(-1,0,1f))
-        setContentView(root)
-        try { val data = JSONArray(prefs.getString("files","[]")); for (i in 0 until data.length()) add(Uri.parse(data.getString(i))) } catch (_: Exception) {}
-        player.addListener(object : Player.Listener {
-            override fun onPlaybackStateChanged(state: Int) { if (state == Player.STATE_ENDED) { if(current in files.indices) prefs.edit().remove("pos:${files[current]}").apply(); if(current+1 < files.size) play(current+1) } }
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) { status.text = "تعذر التشغيل: ${error.errorCodeName}" }
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 16, 24, 16)
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setBackgroundColor(0xff101b28.toInt())
+        }
+
+        root.addView(TextView(this).apply {
+            text = "مكتبتي الصوتية والمرئية"
+            textSize = 24f
+            setTextColor(Color.WHITE)
         })
-        controls.getChildAt(0).requestFocus()
+
+        playerView = PlayerView(this).apply {
+            this.player = this@MainActivity.player
+            useController = true
+            visibility = View.GONE
+            setBackgroundColor(Color.BLACK)
+        }
+        root.addView(playerView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 320))
+
+        val headerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8, 0, 8)
+        }
+        artwork = ImageView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(92, 92)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setImageDrawable(defaultDrawable(isFolder = false))
+        }
+        status = TextView(this).apply {
+            text = "جاهز — أضف ملفات أو مجلدات أو استأنف التشغيل"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setPadding(16, 0, 0, 0)
+        }
+        headerRow.addView(artwork)
+        headerRow.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(headerRow)
+
+        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        root.addView(controls)
+
+        fun addBtn(label: String, action: () -> Unit) {
+            controls.addView(
+                Button(this).apply {
+                    text = label
+                    textSize = 13f
+                    isFocusable = true
+                    setOnClickListener { action() }
+                },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            )
+        }
+
+        addBtn("إضافة ملفات") { pickMedia() }
+        addBtn("تصفح مجلدات") { openFolderBrowser(selectCoverMode = false) }
+        addBtn("تشغيل / إيقاف") { toggle() }
+        addBtn("استئناف") { resumeLast() }
+        addBtn("التالي") { next() }
+        addBtn("أمر صوتي") { voice() }
+
+        list = ListView(this).apply {
+            dividerHeight = 2
+        }
+        adapter = LibraryAdapter()
+        list.adapter = adapter
+
+        list.setOnItemClickListener { _, _, position, _ ->
+            val item = items.getOrNull(position) ?: return@setOnItemClickListener
+            if (item.isFolder && item.folderPath != null) {
+                openFolderBrowser(selectCoverMode = false, startDir = File(item.folderPath))
+            } else {
+                playIndex(position)
+            }
+        }
+
+        list.setOnItemLongClickListener { _, _, position, _ ->
+            showItemOptions(position)
+            true
+        }
+
+        root.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        setContentView(root)
+
+        loadSavedLibrary()
+
+        player.addListener(object : Player.Listener {
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                val hasVid = videoSize.width > 0 && videoSize.height > 0
+                hasVideoTrack = hasVid
+                playerView.visibility = if (hasVid) View.VISIBLE else View.GONE
+            }
+
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_ENDED) {
+                    if (current in items.indices) {
+                        val uriStr = items[current].uri.toString()
+                        prefs.edit()
+                            .remove("pos:$uriStr")
+                            .putBoolean("played:$uriStr", true)
+                            .apply()
+                        adapter.notifyDataSetChanged()
+                    }
+                    playNextPlayable(fromIndex = current + 1)
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                status.text = "تعذر التشغيل: ${error.errorCodeName}"
+            }
+        })
+
+        controls.getChildAt(0)?.requestFocus()
+        autoResumeIfAvailable()
     }
-    private fun pick() { try { startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "audio/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION) },10) } catch (_: Exception) { status.text = "منتقي الملفات غير متوفر في النظام" } }
-    private fun add(uri: Uri) { if(uri in files) return; files.add(uri); val name = try { contentResolver.query(uri,arrayOf(OpenableColumns.DISPLAY_NAME),null,null,null)?.use { if(it.moveToFirst()) it.getString(0) else null } } catch (_: Exception) { null }; names.add(name ?: uri.lastPathSegment ?: "ملف صوتي"); adapter.notifyDataSetChanged() }
-    private fun savePosition() { if(current in files.indices && player.playbackState != Player.STATE_ENDED) prefs.edit().putLong("pos:${files[current]}",player.currentPosition).apply() }
-    private fun play(i: Int) { if(i !in files.indices) return; savePosition(); current=i; player.setMediaItem(MediaItem.fromUri(files[i])); player.seekTo(prefs.getLong("pos:${files[i]}",0)); player.prepare(); player.play(); status.text = "تشغيل: ${names[i]}" }
-    private fun toggle() { if(current < 0) { play(0); return }; if(player.isPlaying) { player.pause(); savePosition(); status.text="متوقف مؤقتاً" } else { player.play(); status.text="تشغيل: ${names[current]}" } }
-    private fun next() { if(current+1 in files.indices) play(current+1) else status.text="لا يوجد ملف تالٍ" }
-    private fun voice() { if (getSharedPreferences("mic", MODE_PRIVATE).getString("mode", "system") != "system") { startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30); return }; try { startActivityForResult(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply { putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,RecognizerIntent.LANGUAGE_MODEL_FREE_FORM); putExtra(RecognizerIntent.EXTRA_LANGUAGE,"ar-JO"); putExtra(RecognizerIntent.EXTRA_PROMPT,"قل الأمر الصوتي") },20) } catch (_: Exception) { status.text="خدمة التعرف الصوتي غير متوفرة على الشاشة" } }
-    private fun normalize(s: String) = s.lowercase().replace(Regex("[\\u064B-\\u065F\\u0640]"),"").replace(Regex("[أإآ]"),"ا").replace('ى','ي').trim()
-    private fun command(raw: String) { val s=normalize(raw); status.text="سمعت: $raw"; when { s.contains("التالي") -> next(); s.contains("توقف") || s.contains("ايقاف") -> { player.pause(); savePosition() }; s.contains("كمل") || s.contains("استكمل") -> { if(current>=0) player.play() else play(0) }; s.contains("قدم") && s.contains("دق") -> if(current>=0) player.seekTo(player.currentPosition+300000); else -> { val q=s.removePrefix("شغل").removePrefix("تشغيل").trim(); val i=names.indexOfFirst { q.isNotBlank() && normalize(it).contains(q) }; if(i>=0) play(i) else status.text="لم أجد ملفاً مطابقاً: $raw" } } }
-    override fun onActivityResult(requestCode: Int,resultCode: Int,data: Intent?) { super.onActivityResult(requestCode,resultCode,data); if(resultCode!=RESULT_OK || data==null) return; if(requestCode==30) { data.getStringExtra("speech")?.let { command(it) } } else if(requestCode==10) { val selected=mutableListOf<Uri>(); data.clipData?.let { for(i in 0 until it.itemCount) selected.add(it.getItemAt(i).uri) }; data.data?.let { selected.add(it) }; for(uri in selected) { try { contentResolver.takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION); add(uri) } catch (_: Exception) { status.text="تعذر حفظ صلاحية الملف" } }; prefs.edit().putString("files",JSONArray(files.map{it.toString()}).toString()).apply() } else if(requestCode==20) { data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { command(it) } } }
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean { if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) { when(event.keyCode) { KeyEvent.KEYCODE_VOICE_ASSIST,KeyEvent.KEYCODE_SEARCH -> { voice(); return true }; KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { toggle(); return true }; KeyEvent.KEYCODE_MEDIA_NEXT -> { next(); return true } } }; return super.dispatchKeyEvent(event) }
-    override fun onPause() { savePosition(); super.onPause() }
-    override fun onDestroy() { savePosition(); player.release(); super.onDestroy() }
+
+    private fun ensureStoragePermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val needed = mutableListOf<String>()
+            if (Build.VERSION.SDK_INT >= 33) {
+                for (perm in listOf(
+                    Manifest.permission.READ_MEDIA_AUDIO,
+                    Manifest.permission.READ_MEDIA_VIDEO,
+                    Manifest.permission.READ_MEDIA_IMAGES
+                )) {
+                    if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
+                        needed.add(perm)
+                    }
+                }
+            } else {
+                if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
+            }
+            if (needed.isNotEmpty()) {
+                requestPermissions(needed.toTypedArray(), 50)
+            }
+        }
+    }
+
+    private fun pickMedia() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("audio/*", "video/*"))
+            addCategory(Intent.CATEGORY_OPENABLE)
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(intent, 10)
+        } catch (_: Exception) {
+            status.text = "منتقي الملفات غير متوفر — فتح متصفح المجلدات الداخلي"
+            openFolderBrowser(selectCoverMode = false)
+        }
+    }
+
+    private fun openFolderBrowser(selectCoverMode: Boolean, startDir: File? = null) {
+        val roots = getStorageRoots()
+        var currentDir = startDir?.takeIf { it.exists() && it.isDirectory }
+            ?: roots.firstOrNull()
+            ?: Environment.getExternalStorageDirectory()
+
+        fun showDirDialog(dir: File) {
+            currentDir = dir
+            val entries = dir.listFiles()?.sortedWith(
+                compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase() }
+            )?.filter { file ->
+                if (selectCoverMode) {
+                    file.isDirectory || isImageFile(file)
+                } else {
+                    file.isDirectory || isMediaFile(file)
+                }
+            } ?: emptyList()
+
+            val labels = mutableListOf<String>()
+            val canGoUp = dir.parentFile != null && dir.parentFile?.canRead() == true
+            if (canGoUp) labels.add("⬆️ مجلد أعلى (${dir.parentFile?.name ?: ".."})")
+            if (!selectCoverMode && dir.canRead()) {
+                labels.add("📁 إضافة هذا المجلد بصوره وملفاته: ${dir.name}")
+            }
+            for (f in entries) {
+                if (f.isDirectory) {
+                    val img = findFolderCover(f)
+                    labels.add(if (img != null) "📂🖼 ${f.name}" else "📂 ${f.name}")
+                } else {
+                    val prefix = if (selectCoverMode) "🖼" else if (isVideoFile(f)) "🎬" else "🎵"
+                    labels.add("$prefix ${f.name}")
+                }
+            }
+
+            AlertDialog.Builder(this)
+                .setTitle(if (selectCoverMode) "اختر صورة: ${dir.name}" else "المجلدات: ${dir.name}")
+                .setItems(labels.toTypedArray()) { dialog, which ->
+                    dialog.dismiss()
+                    var idx = which
+                    if (canGoUp) {
+                        if (idx == 0) {
+                            dir.parentFile?.let { showDirDialog(it) }
+                            return@setItems
+                        }
+                        idx--
+                    }
+                    if (!selectCoverMode && dir.canRead()) {
+                        if (idx == 0) {
+                            addFolderWithMedia(dir)
+                            return@setItems
+                        }
+                        idx--
+                    }
+                    val chosen = entries.getOrNull(idx) ?: return@setItems
+                    if (chosen.isDirectory) {
+                        showDirDialog(chosen)
+                    } else if (selectCoverMode && isImageFile(chosen)) {
+                        applyCoverToTarget(chosen.absolutePath)
+                    } else if (isMediaFile(chosen)) {
+                        val addedIdx = addFileItem(Uri.fromFile(chosen), chosen.name, findMediaCover(chosen))
+                        saveLibrary()
+                        if (addedIdx >= 0) playIndex(addedIdx)
+                    }
+                }
+                .setNeutralButton("تبديل الجذر") { d, _ ->
+                    d.dismiss()
+                    val rootLabels = roots.map { it.absolutePath }.toTypedArray()
+                    AlertDialog.Builder(this)
+                        .setTitle("اختر وحدة التخزين")
+                        .setItems(rootLabels) { _, rIdx ->
+                            roots.getOrNull(rIdx)?.let { showDirDialog(it) }
+                        }
+                        .show()
+                }
+                .setNegativeButton("إغلاق", null)
+                .show()
+        }
+
+        showDirDialog(currentDir)
+    }
+
+    private fun getStorageRoots(): List<File> {
+        val listRoots = mutableListOf<File>()
+        val primary = Environment.getExternalStorageDirectory()
+        if (primary.exists() && primary.canRead()) listRoots.add(primary)
+        try {
+            getExternalFilesDirs(null)?.forEach { extDir ->
+                if (extDir != null) {
+                    val path = extDir.absolutePath
+                    val androidIdx = path.indexOf("/Android/")
+                    val base = if (androidIdx > 0) File(path.substring(0, androidIdx)) else extDir
+                    if (base.exists() && base.canRead() && listRoots.none { it.absolutePath == base.absolutePath }) {
+                        listRoots.add(base)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        if (listRoots.isEmpty()) listRoots.add(File("/"))
+        return listRoots
+    }
+
+    private fun addFolderWithMedia(folder: File) {
+        val folderCover = findFolderCover(folder)?.absolutePath
+        val folderUri = Uri.parse("folder://${folder.absolutePath}")
+        if (items.none { it.uri == folderUri }) {
+            items.add(
+                LibraryItem(
+                    uri = folderUri,
+                    title = "مجلد: ${folder.name}",
+                    isFolder = true,
+                    folderPath = folder.absolutePath,
+                    coverPath = folderCover
+                )
+            )
+        }
+
+        val mediaFiles = folder.walkTopDown()
+            .maxDepth(2)
+            .filter { it.isFile && isMediaFile(it) }
+            .sortedBy { it.name.lowercase() }
+            .toList()
+
+        var addedCount = 0
+        for (media in mediaFiles) {
+            val cover = findMediaCover(media) ?: folderCover
+            val beforeSize = items.size
+            addFileItem(Uri.fromFile(media), media.name, cover)
+            if (items.size > beforeSize) addedCount++
+        }
+
+        adapter.notifyDataSetChanged()
+        saveLibrary()
+        status.text = "تمت إضافة مجلد (${folder.name}) و $addedCount ملف وسائط"
+    }
+
+    private fun addFileItem(uri: Uri, explicitName: String? = null, explicitCover: String? = null): Int {
+        val existingIdx = items.indexOfFirst { it.uri == uri }
+        if (existingIdx >= 0) {
+            if (explicitCover != null && items[existingIdx].coverPath == null) {
+                items[existingIdx].coverPath = explicitCover
+                adapter.notifyDataSetChanged()
+            }
+            return existingIdx
+        }
+
+        val resolvedName = explicitName ?: try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                if (it.moveToFirst()) it.getString(0) else null
+            }
+        } catch (_: Exception) {
+            null
+        } ?: uri.lastPathSegment ?: "ملف وسائط"
+
+        val localFile = uriToLocalFile(uri)
+        val cover = explicitCover ?: localFile?.let { findMediaCover(it) }
+
+        items.add(
+            LibraryItem(
+                uri = uri,
+                title = resolvedName,
+                isFolder = false,
+                folderPath = localFile?.parentFile?.absolutePath,
+                coverPath = cover
+            )
+        )
+        adapter.notifyDataSetChanged()
+        return items.lastIndex
+    }
+
+    private fun uriToLocalFile(uri: Uri): File? {
+        if (uri.scheme.equals("file", ignoreCase = true)) {
+            val path = uri.path ?: return null
+            val f = File(path)
+            return if (f.exists()) f else null
+        }
+        return null
+    }
+
+    private fun findFolderCover(folder: File): File? {
+        val children = folder.listFiles()?.filter { it.isFile && isImageFile(it) } ?: return null
+        val priority = listOf("cover", "folder", "thumb", "thumbnail", "art", "poster")
+        for (p in priority) {
+            children.firstOrNull { it.nameWithoutExtension.lowercase().contains(p) }?.let { return it }
+        }
+        return children.sortedBy { it.name.lowercase() }.firstOrNull()
+    }
+
+    private fun findMediaCover(mediaFile: File): String? {
+        val parent = mediaFile.parentFile ?: return null
+        val baseName = mediaFile.nameWithoutExtension.lowercase()
+        val images = parent.listFiles()?.filter { it.isFile && isImageFile(it) } ?: emptyList()
+
+        images.firstOrNull { it.nameWithoutExtension.lowercase() == baseName }?.let { return it.absolutePath }
+        images.firstOrNull { it.nameWithoutExtension.lowercase().contains(baseName) }?.let { return it.absolutePath }
+        findFolderCover(parent)?.let { return it.absolutePath }
+        return null
+    }
+
+    private fun isMediaFile(file: File): Boolean = file.extension.lowercase() in mediaExts
+    private fun isVideoFile(file: File): Boolean =
+        file.extension.lowercase() in setOf("mp4", "mkv", "webm", "m4v", "3gp", "avi", "mov", "ts", "m2ts", "flv", "vob", "mpg", "mpeg")
+    private fun isImageFile(file: File): Boolean = file.extension.lowercase() in imageExts
+
+    private fun showItemOptions(index: Int) {
+        val item = items.getOrNull(index) ?: return
+        val isPlayed = prefs.getBoolean("played:${item.uri}", false)
+        val options = mutableListOf<String>()
+        if (!item.isFolder) {
+            options.add("تشغيل")
+            options.add(if (isPlayed) "إلغاء علامة «تم تشغيله»" else "تحديد كـ «تم تشغيله»")
+        }
+        options.add("تعيين صورة للملف/المجلد")
+        if (item.coverPath != null) options.add("إزالة الصورة المرتبطة")
+        options.add("حذف من القائمة")
+
+        AlertDialog.Builder(this)
+            .setTitle(item.title)
+            .setItems(options.toTypedArray()) { _, which ->
+                when (options[which]) {
+                    "تشغيل" -> playIndex(index)
+                    "تحديد كـ «تم تشغيله»" -> {
+                        prefs.edit().putBoolean("played:${item.uri}", true).apply()
+                        adapter.notifyDataSetChanged()
+                    }
+                    "إلغاء علامة «تم تشغيله»" -> {
+                        prefs.edit().putBoolean("played:${item.uri}", false).apply()
+                        adapter.notifyDataSetChanged()
+                    }
+                    "تعيين صورة للملف/المجلد" -> {
+                        pendingCoverTargetIndex = index
+                        val start = item.folderPath?.let { File(it) } ?: Environment.getExternalStorageDirectory()
+                        openFolderBrowser(selectCoverMode = true, startDir = start)
+                    }
+                    "إزالة الصورة المرتبطة" -> {
+                        item.coverPath = null
+                        adapter.notifyDataSetChanged()
+                        saveLibrary()
+                        updateHeaderArtwork(item)
+                    }
+                    "حذف من القائمة" -> {
+                        if (current == index) {
+                            player.stop()
+                            playerView.visibility = View.GONE
+                            current = -1
+                        } else if (current > index) {
+                            current--
+                        }
+                        items.removeAt(index)
+                        adapter.notifyDataSetChanged()
+                        saveLibrary()
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun applyCoverToTarget(imagePath: String) {
+        val idx = pendingCoverTargetIndex
+        pendingCoverTargetIndex = -1
+        if (idx !in items.indices) return
+        items[idx].coverPath = imagePath
+        adapter.notifyDataSetChanged()
+        saveLibrary()
+        if (idx == current) {
+            updateHeaderArtwork(items[idx])
+        }
+        status.text = "تم ربط الصورة بنجاح"
+    }
+
+    private fun updateHeaderArtwork(item: LibraryItem?) {
+        if (item == null) {
+            artwork.setImageDrawable(defaultDrawable(isFolder = false))
+            return
+        }
+        artwork.setImageDrawable(loadItemDrawable(item))
+    }
+
+    private fun loadItemDrawable(item: LibraryItem): Drawable {
+        item.coverPath?.let { path ->
+            val f = File(path)
+            if (f.exists()) {
+                decodeSampledBitmap(f.absolutePath, 140, 140)?.let {
+                    return BitmapDrawable(resources, it)
+                }
+            }
+        }
+        if (!item.isFolder) {
+            try {
+                val retriever = MediaMetadataRetriever()
+                if (item.uri.scheme == "file" && item.uri.path != null) {
+                    retriever.setDataSource(item.uri.path)
+                } else {
+                    retriever.setDataSource(this, item.uri)
+                }
+                val art = retriever.embeddedPicture
+                if (art != null) {
+                    retriever.release()
+                    val bmp = BitmapFactory.decodeByteArray(art, 0, art.size)
+                    if (bmp != null) return BitmapDrawable(resources, bmp)
+                }
+                val frame = if (Build.VERSION.SDK_INT >= 27) {
+                    retriever.getScaledFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 140, 140)
+                } else {
+                    retriever.frameAtTime
+                }
+                retriever.release()
+                if (frame != null) return BitmapDrawable(resources, frame)
+            } catch (_: Exception) {
+            }
+        }
+        return defaultDrawable(item.isFolder)
+    }
+
+    private fun decodeSampledBitmap(path: String, reqW: Int, reqH: Int): Bitmap? {
+        return try {
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, opts)
+            var sample = 1
+            while (opts.outHeight / sample > reqH * 2 || opts.outWidth / sample > reqW * 2) {
+                sample *= 2
+            }
+            BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun defaultDrawable(isFolder: Boolean): Drawable {
+        val size = 96
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(if (isFolder) 0xff284363.toInt() else 0xff1f344d.toInt())
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 42f
+            textAlign = Paint.Align.CENTER
+        }
+        val icon = if (isFolder) "📁" else "🎬"
+        canvas.drawText(icon, size / 2f, size * 0.65f, paint)
+        return BitmapDrawable(resources, bmp)
+    }
+
+    private fun saveLibrary() {
+        val arr = JSONArray()
+        for (it in items) {
+            val obj = JSONObject().apply {
+                put("uri", it.uri.toString())
+                put("title", it.title)
+                put("isFolder", it.isFolder)
+                put("folderPath", it.folderPath ?: JSONObject.NULL)
+                put("coverPath", it.coverPath ?: JSONObject.NULL)
+            }
+            arr.put(obj)
+        }
+        prefs.edit().putString("items_v2", arr.toString()).apply()
+    }
+
+    private fun loadSavedLibrary() {
+        val rawV2 = prefs.getString("items_v2", null)
+        if (!rawV2.isNullOrBlank()) {
+            try {
+                val arr = JSONArray(rawV2)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val uri = Uri.parse(obj.getString("uri"))
+                    val title = obj.optString("title", uri.lastPathSegment ?: "عنصر")
+                    val isFolder = obj.optBoolean("isFolder", false)
+                    val folderPath = obj.optString("folderPath").takeIf { it.isNotBlank() && it != "null" }
+                    val coverPath = obj.optString("coverPath").takeIf { it.isNotBlank() && it != "null" }
+                    items.add(LibraryItem(uri, title, isFolder, folderPath, coverPath))
+                }
+                adapter.notifyDataSetChanged()
+                return
+            } catch (_: Exception) {
+            }
+        }
+
+        try {
+            val legacy = JSONArray(prefs.getString("files", "[]"))
+            for (i in 0 until legacy.length()) {
+                addFileItem(Uri.parse(legacy.getString(i)))
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun savePosition() {
+        if (current !in items.indices) return
+        val item = items[current]
+        if (item.isFolder) return
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        val dur = player.duration
+        val uriStr = item.uri.toString()
+
+        if (dur > 0 && dur != C.TIME_UNSET && pos >= dur - 1500L) {
+            prefs.edit()
+                .remove("pos:$uriStr")
+                .putBoolean("played:$uriStr", true)
+                .apply()
+            adapter.notifyDataSetChanged()
+        } else {
+            val editor = prefs.edit()
+                .putLong("pos:$uriStr", pos)
+                .putString("last_uri", uriStr)
+            if (pos > 1000L) {
+                editor.putBoolean("played:$uriStr", true)
+            }
+            editor.apply()
+            adapter.notifyDataSetChanged()
+        }
+    }
+
+    private fun playIndex(i: Int, forceStartMs: Long? = null) {
+        if (i !in items.indices) return
+        val item = items[i]
+        if (item.isFolder) {
+            playNextPlayable(fromIndex = i + 1)
+            return
+        }
+
+        savePosition()
+        current = i
+        val uriStr = item.uri.toString()
+        prefs.edit()
+            .putString("last_uri", uriStr)
+            .putBoolean("played:$uriStr", true)
+            .apply()
+
+        val resumeMs = forceStartMs ?: prefs.getLong("pos:$uriStr", 0L).coerceAtLeast(0L)
+        hasVideoTrack = false
+        playerView.visibility = View.GONE
+
+        player.setMediaItem(MediaItem.fromUri(item.uri))
+        player.prepare()
+        if (resumeMs > 0L) {
+            player.seekTo(resumeMs)
+        }
+        player.play()
+        updateHeaderArtwork(item)
+        adapter.notifyDataSetChanged()
+
+        val sec = resumeMs / 1000
+        status.text = if (sec > 0) {
+            "تشغيل: ${item.title} (من ${sec / 60}:${String.format("%02d", sec % 60)})"
+        } else {
+            "تشغيل: ${item.title}"
+        }
+    }
+
+    private fun playNextPlayable(fromIndex: Int) {
+        for (idx in fromIndex until items.size) {
+            if (!items[idx].isFolder) {
+                playIndex(idx)
+                return
+            }
+        }
+        status.text = "لا يوجد ملف تالٍ"
+    }
+
+    private fun autoResumeIfAvailable() {
+        val lastUriStr = prefs.getString("last_uri", null) ?: return
+        val idx = items.indexOfFirst { !it.isFolder && it.uri.toString() == lastUriStr }
+        if (idx >= 0) {
+            current = idx
+            val savedPos = prefs.getLong("pos:${items[idx].uri}", 0L)
+            updateHeaderArtwork(items[idx])
+            if (savedPos > 1000L) {
+                val sec = savedPos / 1000
+                status.text = "محفوظ عند ${sec / 60}:${String.format("%02d", sec % 60)} — ${items[idx].title}"
+            }
+        }
+    }
+
+    private fun resumeLast() {
+        val lastUriStr = prefs.getString("last_uri", null)
+        val idx = if (current in items.indices && !items[current].isFolder) {
+            current
+        } else if (lastUriStr != null) {
+            items.indexOfFirst { !it.isFolder && it.uri.toString() == lastUriStr }
+        } else {
+            items.indexOfFirst { !it.isFolder }
+        }
+
+        if (idx >= 0) {
+            playIndex(idx)
+        } else {
+            status.text = "لا يوجد تشغيل سابق لاستئنافه"
+        }
+    }
+
+    private fun toggle() {
+        if (current !in items.indices || items[current].isFolder) {
+            resumeLast()
+            return
+        }
+        if (player.isPlaying) {
+            player.pause()
+            savePosition()
+            status.text = "متوقف مؤقتاً: ${items[current].title}"
+        } else {
+            player.play()
+            status.text = "تشغيل: ${items[current].title}"
+        }
+    }
+
+    private fun next() {
+        if (current < 0) {
+            playNextPlayable(0)
+        } else {
+            playNextPlayable(current + 1)
+        }
+    }
+
+    private fun voice() {
+        if (getSharedPreferences("mic", MODE_PRIVATE).getString("mode", "system") != "system") {
+            startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30)
+            return
+        }
+        try {
+            startActivityForResult(
+                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-JO")
+                    putExtra(RecognizerIntent.EXTRA_PROMPT, "قل الأمر الصوتي")
+                },
+                20
+            )
+        } catch (_: Exception) {
+            status.text = "خدمة التعرف الصوتي غير متوفرة على الشاشة"
+        }
+    }
+
+    private fun normalize(s: String) = s.lowercase()
+        .replace(Regex("[\\u064B-\\u065F\\u0640]"), "")
+        .replace(Regex("[أإآ]"), "ا")
+        .replace('ى', 'ي')
+        .trim()
+
+    private fun command(raw: String) {
+        val s = normalize(raw)
+        status.text = "سمعت: $raw"
+        when {
+            s.contains("التالي") -> next()
+            s.contains("توقف") || s.contains("ايقاف") -> {
+                player.pause()
+                savePosition()
+            }
+            s.contains("كمل") || s.contains("استكمل") -> resumeLast()
+            s.contains("قدم") && s.contains("دق") -> {
+                if (current in items.indices && !items[current].isFolder) {
+                    player.seekTo(player.currentPosition + 300000L)
+                    savePosition()
+                }
+            }
+            else -> {
+                val q = s.removePrefix("شغل").removePrefix("تشغيل").trim()
+                val idx = items.indexOfFirst { !it.isFolder && q.isNotBlank() && normalize(it.title).contains(q) }
+                if (idx >= 0) playIndex(idx) else status.text = "لم أجد ملفاً مطابقاً: $raw"
+            }
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK || data == null) return
+        when (requestCode) {
+            30 -> data.getStringExtra("speech")?.let { command(it) }
+            10 -> {
+                val selected = mutableListOf<Uri>()
+                data.clipData?.let { for (i in 0 until it.itemCount) selected.add(it.getItemAt(i).uri) }
+                data.data?.let { selected.add(it) }
+                for (uri in selected) {
+                    try {
+                        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    } catch (_: Exception) {
+                    }
+                    addFileItem(uri)
+                }
+                saveLibrary()
+            }
+            20 -> data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { command(it) }
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_VOICE_ASSIST, KeyEvent.KEYCODE_SEARCH -> {
+                    voice()
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                    toggle()
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                    next()
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        handler.post(saveTick)
+    }
+
+    override fun onStop() {
+        handler.removeCallbacks(saveTick)
+        savePosition()
+        super.onStop()
+    }
+
+    override fun onPause() {
+        savePosition()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacks(saveTick)
+        savePosition()
+        player.release()
+        super.onDestroy()
+    }
+
+    private inner class LibraryAdapter : BaseAdapter() {
+        override fun getCount(): Int = items.size
+        override fun getItem(position: Int): Any = items[position]
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val item = items[position]
+            val row = (convertView as? LinearLayout) ?: LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(12, 10, 12, 10)
+            }
+            row.removeAllViews()
+
+            val img = ImageView(this@MainActivity).apply {
+                layoutParams = LinearLayout.LayoutParams(76, 76)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setImageDrawable(loadItemDrawable(item))
+            }
+
+            val uriStr = item.uri.toString()
+            val savedMs = if (!item.isFolder) prefs.getLong("pos:$uriStr", 0L) else 0L
+            val isPlayed = if (!item.isFolder) prefs.getBoolean("played:$uriStr", false) else false
+
+            val posTag = if (savedMs > 1000L) {
+                val sec = savedMs / 1000
+                " [${sec / 60}:${String.format("%02d", sec % 60)}]"
+            } else {
+                ""
+            }
+            val playedTag = if (!item.isFolder && isPlayed) "  • ✓ تم تشغيله" else ""
+
+            val tv = TextView(this@MainActivity).apply {
+                text = item.title + posTag + playedTag
+                textSize = 17f
+                setTextColor(
+                    when {
+                        position == current -> 0xff66d9ef.toInt()
+                        isPlayed -> 0xffa6e22e.toInt()
+                        else -> Color.WHITE
+                    }
+                )
+                setPadding(16, 12, 8, 12)
+            }
+
+            row.addView(img)
+            row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            return row
+        }
+    }
 }
