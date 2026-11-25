@@ -151,11 +151,16 @@ class MainActivity : Activity() {
         headerRow.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(headerRow)
 
-        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(controls)
+        val controlsRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val controlsRow2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 6, 0, 6)
+        }
+        root.addView(controlsRow1)
+        root.addView(controlsRow2)
 
-        fun addBtn(label: String, action: () -> Unit) {
-            controls.addView(
+        fun addBtn(parent: LinearLayout, label: String, action: () -> Unit) {
+            parent.addView(
                 Button(this).apply {
                     text = label
                     textSize = 13f
@@ -166,12 +171,16 @@ class MainActivity : Activity() {
             )
         }
 
-        addBtn("إضافة ملفات") { pickMedia() }
-        addBtn("تصفح مجلدات") { openFolderBrowser(selectCoverMode = false) }
-        addBtn("تشغيل / إيقاف") { toggle() }
-        addBtn("استئناف") { resumeLast() }
-        addBtn("التالي") { next() }
-        addBtn("أمر صوتي") { voice() }
+        addBtn(controlsRow1, "إضافة ملفات") { pickMedia() }
+        addBtn(controlsRow1, "تصفح مجلدات") { openFolderBrowser(selectCoverMode = false) }
+        addBtn(controlsRow1, "تشغيل / إيقاف") { toggle() }
+        addBtn(controlsRow1, "استئناف") { resumeLast() }
+
+        addBtn(controlsRow2, "التالي") { next() }
+        addBtn(controlsRow2, "أمر صوتي") { voice() }
+        addBtn(controlsRow2, "فحص المايك") {
+            startActivityForResult(Intent(this, MicActivity::class.java), 30)
+        }
 
         list = ListView(this).apply {
             dividerHeight = 2
@@ -252,7 +261,7 @@ class MainActivity : Activity() {
             }
         })
 
-        controls.getChildAt(0)?.requestFocus()
+        controlsRow1.getChildAt(0)?.requestFocus()
         autoResumeIfAvailable()
     }
 
@@ -871,21 +880,26 @@ class MainActivity : Activity() {
     }
 
     private fun voice() {
-        if (getSharedPreferences("mic", MODE_PRIVATE).getString("mode", "system") != "system") {
+        val micPrefs = getSharedPreferences("mic", MODE_PRIVATE)
+        val savedMode = micPrefs.getString("mode", "system")
+        if (savedMode != "system") {
             startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30)
             return
         }
         try {
-            startActivityForResult(
-                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-JO")
-                    putExtra(RecognizerIntent.EXTRA_PROMPT, "قل الأمر الصوتي")
-                },
-                20
-            )
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-JO")
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "قل الأمر الصوتي")
+                putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+            }
+            if (intent.resolveActivity(packageManager) != null) {
+                startActivityForResult(intent, 20)
+            } else {
+                startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30)
+            }
         } catch (_: Exception) {
-            status.text = "خدمة التعرف الصوتي غير متوفرة على الشاشة"
+            startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30)
         }
     }
 
@@ -922,7 +936,7 @@ class MainActivity : Activity() {
             else -> {
                 val q = s.removePrefix("شغل").removePrefix("تشغيل").trim()
                 val idx = items.indexOfFirst { !it.isFolder && q.isNotBlank() && normalize(it.title).contains(q) }
-                if (idx >= 0) playIndex(idx) else status.text = "لم أجد ملفاً مطابقاً: $raw"
+                if (idx >= 0) playIndex(idx) else status.text = "لم أجد ملفاً مطابقاً داخل المكتبة: $raw"
             }
         }
     }
