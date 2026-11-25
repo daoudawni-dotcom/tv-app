@@ -34,7 +34,7 @@ class MicActivity : Activity() {
         fun btn(title: String, action: () -> Unit) { row.addView(Button(this).apply { text = title; setOnClickListener { action() } }, LinearLayout.LayoutParams(0,-2,1f)) }
         btn("ابدأ الفحص") { startTest() }; btn("إيقاف") { stopTest(); report("تم إيقاف الفحص") }; btn("اعتماد الوضع") { val k = keys[mode.selectedItemPosition]; if(k in arrayOf("system","direct","offline")) { prefs.edit().putString("mode", k).apply(); report("تم حفظ وضع الأوامر: $k") } else report("هذا وضع تشخيص فقط وليس محرك تعرف على الكلام") }; btn("استخدم النص") { if(lastSpeech.isNotBlank()) deliver(lastSpeech) else report("لا توجد نتيجة صوتية بعد") }
         meter = ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply { max = 100 }; root.addView(meter)
-        val scroll = ScrollView(this); log = TextView(this).apply { textSize = 16f; textIsSelectable = false }; scroll.addView(log); root.addView(scroll, LinearLayout.LayoutParams(-1,0,1f)); setContentView(root)
+        val scroll = ScrollView(this); log = TextView(this).apply { textSize = 16f; setTextIsSelectable(false) }; scroll.addView(log); root.addView(scroll, LinearLayout.LayoutParams(-1,0,1f)); setContentView(root)
         val manager = getSystemService(AUDIO_SERVICE) as AudioManager
         report("Android SDK: ${Build.VERSION.SDK_INT}\nخدمة التعرف: ${SpeechRecognizer.isRecognitionAvailable(this)}")
         if(Build.VERSION.SDK_INT >= 31) report("التعرف المحلي: ${SpeechRecognizer.isOnDeviceRecognitionAvailable(this)}")
@@ -100,3 +100,10 @@ class MicActivity : Activity() {
     override fun onStop() { stopTest(); super.onStop() }
     override fun onDestroy() { stopTest(); super.onDestroy() }
 }
+```[cite: 10]
+
+### خطوات اللصق والتشغيل:
+1. في GitHub افتح ملف `AudioTV-build/app/src/main/java/com/audiotv/player/MicActivity.kt` واضغط على أيقونة القلم (**Edit**)[cite: 10].
+2. حدد كامل النص القديم (`Ctrl + A`) وامسحه، ثم الصق الكود أعلاه (`Ctrl + V`).
+3. اضغط **Commit changes** (مرتين للتأكيد).
+4. انتقل إلى تبويب **Actions** وانتظر دقيقة واحدة حتى يكتمل البناء باللون الأخضر (**Success**)، ثم انزل لقسم **Artifacts** وحمّل ملف **`AudioTV-debug`**[cite: 1].
