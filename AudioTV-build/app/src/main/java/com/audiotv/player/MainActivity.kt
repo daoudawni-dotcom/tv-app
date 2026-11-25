@@ -402,22 +402,63 @@ class MainActivity : Activity() {
 
     private fun getStorageRoots(): List<File> {
         val listRoots = mutableListOf<File>()
-        val primary = Environment.getExternalStorageDirectory()
-        if (primary.exists() && primary.canRead()) listRoots.add(primary)
+
+        fun addCandidate(dir: File?) {
+            if (dir == null) return
+            try {
+                if (dir.exists() && dir.isDirectory && dir.canRead() &&
+                    listRoots.none { it.absolutePath == dir.absolutePath }
+                ) {
+                    listRoots.add(dir)
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        addCandidate(Environment.getExternalStorageDirectory())
+
         try {
             getExternalFilesDirs(null)?.forEach { extDir ->
                 if (extDir != null) {
                     val path = extDir.absolutePath
                     val androidIdx = path.indexOf("/Android/")
                     val base = if (androidIdx > 0) File(path.substring(0, androidIdx)) else extDir
-                    if (base.exists() && base.canRead() && listRoots.none { it.absolutePath == base.absolutePath }) {
-                        listRoots.add(base)
-                    }
+                    addCandidate(base)
                 }
             }
         } catch (_: Exception) {
         }
-        if (listRoots.isEmpty()) listRoots.add(File("/"))
+
+        try {
+            File("/storage").listFiles()?.forEach { entry ->
+                if (entry.isDirectory && entry.name != "emulated" && entry.name != "self") {
+                    addCandidate(entry)
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        val extraMountPaths = listOf(
+            "/mnt/media_rw",
+            "/mnt/usb",
+            "/mnt/udisk",
+            "/mnt/usb_storage",
+            "/mnt/sdcard/usb_storage"
+        )
+        for (p in extraMountPaths) {
+            val base = File(p)
+            if (base.exists() && base.isDirectory) {
+                addCandidate(base)
+                try {
+                    base.listFiles()?.forEach { sub ->
+                        if (sub.isDirectory) addCandidate(sub)
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        if (listRoots.isEmpty()) addCandidate(File("/"))
         return listRoots
     }
 
