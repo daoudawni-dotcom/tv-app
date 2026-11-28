@@ -12,7 +12,6 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
-import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -55,6 +54,7 @@ class MainActivity : Activity() {
     private lateinit var player: ExoPlayer
     private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
+    private lateinit var timeInfo: TextView
     private lateinit var artwork: ImageView
     private lateinit var list: ListView
     private lateinit var adapter: ArrayAdapter<String>
@@ -77,12 +77,15 @@ class MainActivity : Activity() {
     )
     private val imageExts = setOf("jpg", "jpeg", "png", "webp", "bmp", "gif")
 
-    private val saveTick = object : Runnable {
+    private val tickRunnable = object : Runnable {
         override fun run() {
-            if (::player.isInitialized && player.isPlaying) {
-                savePosition()
+            if (::player.isInitialized) {
+                updateTimeDisplay()
+                if (player.isPlaying) {
+                    savePositionSilent()
+                }
             }
-            handler.postDelayed(this, 4000L)
+            handler.postDelayed(this, 1000L)
         }
     }
 
@@ -94,14 +97,14 @@ class MainActivity : Activity() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 16, 24, 16)
+            setPadding(24, 14, 24, 14)
             layoutDirection = View.LAYOUT_DIRECTION_RTL
             setBackgroundColor(0xff101b28.toInt())
         }
 
         root.addView(TextView(this).apply {
             text = "مكتبتي الصوتية والمرئية"
-            textSize = 24f
+            textSize = 22f
             setTextColor(Color.WHITE)
         })
 
@@ -110,45 +113,58 @@ class MainActivity : Activity() {
             holder.addCallback(object : SurfaceHolder.Callback {
                 override fun surfaceCreated(holder: SurfaceHolder) {
                     surfaceReady = true
-                    if (hasVideoTrack) {
-                        player.setVideoSurfaceHolder(holder)
+                    if (hasVideoTrack && ::player.isInitialized) {
+                        player.setVideoSurfaceView(this@surfaceView)
                     }
                 }
 
                 override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                     surfaceReady = true
-                    if (hasVideoTrack) {
-                        player.setVideoSurfaceHolder(holder)
+                    if (hasVideoTrack && ::player.isInitialized) {
+                        player.setVideoSurfaceView(this@surfaceView)
                     }
                 }
 
                 override fun surfaceDestroyed(holder: SurfaceHolder) {
                     surfaceReady = false
                     if (::player.isInitialized) {
-                        player.clearVideoSurfaceHolder(holder)
+                        player.clearVideoSurfaceView(this@surfaceView)
                     }
                 }
             })
         }
-        root.addView(surfaceView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 320))
+        root.addView(surfaceView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 420))
 
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 8, 0, 8)
+            setPadding(0, 8, 0, 6)
         }
         artwork = ImageView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(92, 92)
+            layoutParams = LinearLayout.LayoutParams(84, 84)
             scaleType = ImageView.ScaleType.CENTER_CROP
             setImageDrawable(defaultDrawable(isFolder = false))
         }
+
+        val infoCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(14, 0, 0, 0)
+        }
         status = TextView(this).apply {
             text = "جاهز — أضف ملفات أو مجلدات أو استأنف التشغيل"
-            textSize = 16f
+            textSize = 15f
             setTextColor(Color.WHITE)
-            setPadding(16, 0, 0, 0)
         }
+        timeInfo = TextView(this).apply {
+            text = "مضى: 00:00  |  باقي: 00:00  |  الكلي: 00:00"
+            textSize = 14f
+            setTextColor(0xff9ad1ff.toInt())
+            setPadding(0, 4, 0, 0)
+        }
+        infoCol.addView(status)
+        infoCol.addView(timeInfo)
+
         headerRow.addView(artwork)
-        headerRow.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        headerRow.addView(infoCol, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(headerRow)
 
         val controlsRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -177,10 +193,8 @@ class MainActivity : Activity() {
         addBtn(controlsRow1, "استئناف") { resumeLast() }
 
         addBtn(controlsRow2, "التالي") { next() }
-        addBtn(controlsRow2, "بحث داخلي صوتي") { voice() }
-        addBtn(controlsRow2, "فحص المايك") {
-            startActivityForResult(Intent(this, MicActivity::class.java), 30)
-        }
+        addBtn(controlsRow2, "أمر صوتي") { voice() }
+        addBtn(controlsRow2, "فحص المايك") { openMicScreen(autoStart = false) }
 
         list = ListView(this).apply {
             dividerHeight = 2
@@ -234,15 +248,16 @@ class MainActivity : Activity() {
                 if (hasVid) {
                     surfaceView.visibility = View.VISIBLE
                     if (surfaceReady) {
-                        player.setVideoSurfaceHolder(surfaceView.holder)
+                        player.setVideoSurfaceView(surfaceView)
                     }
                 } else {
                     surfaceView.visibility = View.GONE
-                    player.clearVideoSurface()
+                    player.clearVideoSurfaceView(surfaceView)
                 }
             }
 
             override fun onPlaybackStateChanged(state: Int) {
+                updateTimeDisplay()
                 if (state == Player.STATE_ENDED) {
                     if (current in items.indices) {
                         val uriStr = items[current].uri.toString()
@@ -263,6 +278,28 @@ class MainActivity : Activity() {
 
         controlsRow1.getChildAt(0)?.requestFocus()
         autoResumeIfAvailable()
+        updateTimeDisplay()
+    }
+
+    private fun formatDuration(ms: Long): String {
+        if (ms <= 0L || ms == C.TIME_UNSET) return "00:00"
+        val totalSec = ms / 1000L
+        val hours = totalSec / 3600L
+        val mins = (totalSec % 3600L) / 60L
+        val secs = totalSec % 60L
+        return if (hours > 0L) {
+            String.format("%d:%02d:%02d", hours, mins, secs)
+        } else {
+            String.format("%02d:%02d", mins, secs)
+        }
+    }
+
+    private fun updateTimeDisplay() {
+        val pos = if (::player.isInitialized) player.currentPosition.coerceAtLeast(0L) else 0L
+        val dur = if (::player.isInitialized) player.duration else C.TIME_UNSET
+        val hasDur = dur > 0L && dur != C.TIME_UNSET
+        val rem = if (hasDur) (dur - pos).coerceAtLeast(0L) else 0L
+        timeInfo.text = "مضى: ${formatDuration(pos)}  |  باقي: ${if (hasDur) formatDuration(rem) else "--:--"}  |  الكلي: ${if (hasDur) formatDuration(dur) else "--:--"}"
     }
 
     private fun refreshListLabels() {
@@ -273,8 +310,7 @@ class MainActivity : Activity() {
             val isPlayed = if (!item.isFolder) prefs.getBoolean("played:$uriStr", false) else false
 
             val posTag = if (savedMs > 1000L) {
-                val sec = savedMs / 1000
-                " [${sec / 60}:${String.format("%02d", sec % 60)}]"
+                " [${formatDuration(savedMs)}]"
             } else {
                 ""
             }
@@ -662,32 +698,8 @@ class MainActivity : Activity() {
         item.coverPath?.let { path ->
             val f = File(path)
             if (f.exists()) {
-                val bmp = decodeSampledBitmap(f.absolutePath, 140, 140)
+                val bmp = decodeSampledBitmap(f.absolutePath, 120, 120)
                 if (bmp != null) return BitmapDrawable(resources, bmp)
-            }
-        }
-        if (!item.isFolder) {
-            try {
-                val retriever = MediaMetadataRetriever()
-                if (item.uri.scheme == "file" && item.uri.path != null) {
-                    retriever.setDataSource(item.uri.path)
-                } else {
-                    retriever.setDataSource(this, item.uri)
-                }
-                val art = retriever.embeddedPicture
-                if (art != null) {
-                    retriever.release()
-                    val bmp = BitmapFactory.decodeByteArray(art, 0, art.size)
-                    if (bmp != null) return BitmapDrawable(resources, bmp)
-                }
-                val frame = if (Build.VERSION.SDK_INT >= 27) {
-                    retriever.getScaledFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 140, 140)
-                } else {
-                    retriever.frameAtTime
-                }
-                retriever.release()
-                if (frame != null) return BitmapDrawable(resources, frame)
-            } catch (_: Exception) {
             }
         }
         return defaultDrawable(item.isFolder)
@@ -708,13 +720,13 @@ class MainActivity : Activity() {
     }
 
     private fun defaultDrawable(isFolder: Boolean): Drawable {
-        val size = 96
+        val size = 84
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         canvas.drawColor(if (isFolder) 0xff284363.toInt() else 0xff1f344d.toInt())
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
-            textSize = 36f
+            textSize = 34f
             textAlign = Paint.Align.CENTER
         }
         val tag = if (isFolder) "DIR" else "AV"
@@ -765,7 +777,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun savePosition() {
+    private fun savePositionSilent() {
         if (current !in items.indices) return
         val item = items[current]
         if (item.isFolder) return
@@ -778,7 +790,6 @@ class MainActivity : Activity() {
                 .remove("pos:$uriStr")
                 .putBoolean("played:$uriStr", true)
                 .apply()
-            refreshListLabels()
         } else {
             val editor = prefs.edit()
                 .putLong("pos:$uriStr", pos)
@@ -787,8 +798,12 @@ class MainActivity : Activity() {
                 editor.putBoolean("played:$uriStr", true)
             }
             editor.apply()
-            refreshListLabels()
         }
+    }
+
+    private fun savePosition() {
+        savePositionSilent()
+        refreshListLabels()
     }
 
     private fun playIndex(i: Int, forceStartMs: Long? = null) {
@@ -799,7 +814,7 @@ class MainActivity : Activity() {
             return
         }
 
-        savePosition()
+        savePositionSilent()
         current = i
         val uriStr = item.uri.toString()
         prefs.edit()
@@ -810,7 +825,7 @@ class MainActivity : Activity() {
         val resumeMs = forceStartMs ?: prefs.getLong("pos:$uriStr", 0L).coerceAtLeast(0L)
         hasVideoTrack = false
         surfaceView.visibility = View.GONE
-        player.clearVideoSurface()
+        player.clearVideoSurfaceView(surfaceView)
 
         player.setMediaItem(MediaItem.fromUri(item.uri))
         player.prepare()
@@ -819,11 +834,11 @@ class MainActivity : Activity() {
         }
         player.play()
         updateHeaderArtwork(item)
+        updateTimeDisplay()
         refreshListLabels()
 
-        val sec = resumeMs / 1000
-        status.text = if (sec > 0) {
-            "تشغيل: ${item.title} (من ${sec / 60}:${String.format("%02d", sec % 60)})"
+        status.text = if (resumeMs > 1000L) {
+            "تشغيل: ${item.title} (استئناف من ${formatDuration(resumeMs)})"
         } else {
             "تشغيل: ${item.title}"
         }
@@ -847,8 +862,7 @@ class MainActivity : Activity() {
             val savedPos = prefs.getLong("pos:${items[idx].uri}", 0L)
             updateHeaderArtwork(items[idx])
             if (savedPos > 1000L) {
-                val sec = savedPos / 1000
-                status.text = "محفوظ عند ${sec / 60}:${String.format("%02d", sec % 60)} — ${items[idx].title}"
+                status.text = "محفوظ عند ${formatDuration(savedPos)} — ${items[idx].title}"
             }
         }
     }
@@ -883,6 +897,7 @@ class MainActivity : Activity() {
             player.play()
             status.text = "تشغيل: ${items[current].title}"
         }
+        updateTimeDisplay()
     }
 
     private fun next() {
@@ -893,8 +908,18 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun openMicScreen(autoStart: Boolean) {
+        try {
+            val intent = Intent(this, MicActivity::class.java)
+            if (autoStart) intent.putExtra("auto", true)
+            startActivityForResult(intent, 30)
+        } catch (_: Exception) {
+            status.text = "تعذر فتح شاشة المايك"
+        }
+    }
+
     private fun voice() {
-        startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30)
+        openMicScreen(autoStart = false)
     }
 
     private fun normalize(s: String): String {
@@ -925,6 +950,7 @@ class MainActivity : Activity() {
                 if (current in items.indices && !items[current].isFolder) {
                     player.seekTo(player.currentPosition + 300000L)
                     savePosition()
+                    updateTimeDisplay()
                 }
             }
             else -> {
@@ -941,23 +967,29 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK || data == null) return
-        when (requestCode) {
-            30 -> data.getStringExtra("speech")?.let { command(it) }
-            10 -> {
-                val selected = mutableListOf<Uri>()
-                data.clipData?.let { for (i in 0 until it.itemCount) selected.add(it.getItemAt(i).uri) }
-                data.data?.let { selected.add(it) }
-                for (uri in selected) {
-                    try {
-                        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    } catch (_: Exception) {
-                    }
-                    addFileItem(uri)
-                }
-                refreshListLabels()
-                saveLibrary()
+        if (requestCode == 30) {
+            val speech = data?.getStringExtra("speech")?.trim()
+            if (resultCode == RESULT_OK && !speech.isNullOrEmpty()) {
+                command(speech)
+            } else {
+                status.text = "لم يتم التقاط صوت من المايك — جرّب «فحص المايك»"
             }
+            return
+        }
+        if (resultCode != RESULT_OK || data == null) return
+        if (requestCode == 10) {
+            val selected = mutableListOf<Uri>()
+            data.clipData?.let { for (i in 0 until it.itemCount) selected.add(it.getItemAt(i).uri) }
+            data.data?.let { selected.add(it) }
+            for (uri in selected) {
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: Exception) {
+                }
+                addFileItem(uri)
+            }
+            refreshListLabels()
+            saveLibrary()
         }
     }
 
@@ -983,23 +1015,23 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        handler.post(saveTick)
+        handler.post(tickRunnable)
     }
 
     override fun onStop() {
-        handler.removeCallbacks(saveTick)
-        savePosition()
+        handler.removeCallbacks(tickRunnable)
+        savePositionSilent()
         super.onStop()
     }
 
     override fun onPause() {
-        savePosition()
+        savePositionSilent()
         super.onPause()
     }
 
     override fun onDestroy() {
-        handler.removeCallbacks(saveTick)
-        savePosition()
+        handler.removeCallbacks(tickRunnable)
+        savePositionSilent()
         player.release()
         super.onDestroy()
     }
