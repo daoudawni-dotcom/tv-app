@@ -20,7 +20,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
-import android.speech.RecognizerIntent
+import android.provider.Settings
 import android.view.KeyEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -177,7 +177,7 @@ class MainActivity : Activity() {
         addBtn(controlsRow1, "استئناف") { resumeLast() }
 
         addBtn(controlsRow2, "التالي") { next() }
-        addBtn(controlsRow2, "أمر صوتي") { voice() }
+        addBtn(controlsRow2, "بحث داخلي صوتي") { voice() }
         addBtn(controlsRow2, "فحص المايك") {
             startActivityForResult(Intent(this, MicActivity::class.java), 30)
         }
@@ -289,6 +289,20 @@ class MainActivity : Activity() {
     }
 
     private fun ensureStoragePermission() {
+        if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                )
+            } catch (_: Exception) {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                } catch (_: Exception) {
+                }
+            }
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val needed = mutableListOf<String>()
             if (Build.VERSION.SDK_INT >= 33) {
@@ -880,27 +894,7 @@ class MainActivity : Activity() {
     }
 
     private fun voice() {
-        val micPrefs = getSharedPreferences("mic", MODE_PRIVATE)
-        val savedMode = micPrefs.getString("mode", "system")
-        if (savedMode != "system") {
-            startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30)
-            return
-        }
-        try {
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar-JO")
-                putExtra(RecognizerIntent.EXTRA_PROMPT, "قل الأمر الصوتي")
-                putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-            }
-            if (intent.resolveActivity(packageManager) != null) {
-                startActivityForResult(intent, 20)
-            } else {
-                startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30)
-            }
-        } catch (_: Exception) {
-            startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30)
-        }
+        startActivityForResult(Intent(this, MicActivity::class.java).putExtra("auto", true), 30)
     }
 
     private fun normalize(s: String): String {
@@ -919,7 +913,7 @@ class MainActivity : Activity() {
 
     private fun command(raw: String) {
         val s = normalize(raw)
-        status.text = "سمعت: $raw"
+        status.text = "بحث داخلي عن: $raw"
         when {
             s.contains("التالي") -> next()
             s.contains("توقف") || s.contains("ايقاف") -> {
@@ -934,9 +928,13 @@ class MainActivity : Activity() {
                 }
             }
             else -> {
-                val q = s.removePrefix("شغل").removePrefix("تشغيل").trim()
+                val q = s.removePrefix("شغل").removePrefix("تشغيل").removePrefix("ابحث").removePrefix("بحث").trim()
                 val idx = items.indexOfFirst { !it.isFolder && q.isNotBlank() && normalize(it.title).contains(q) }
-                if (idx >= 0) playIndex(idx) else status.text = "لم أجد ملفاً مطابقاً داخل المكتبة: $raw"
+                if (idx >= 0) {
+                    playIndex(idx)
+                } else {
+                    status.text = "لا يوجد ملف بهذا الاسم داخل المكتبة: $raw"
+                }
             }
         }
     }
@@ -960,7 +958,6 @@ class MainActivity : Activity() {
                 refreshListLabels()
                 saveLibrary()
             }
-            20 -> data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { command(it) }
         }
     }
 
