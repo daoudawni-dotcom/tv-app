@@ -108,32 +108,32 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
         })
 
-        surfaceView = SurfaceView(this).apply {
-            visibility = View.GONE
-            holder.addCallback(object : SurfaceHolder.Callback {
-                override fun surfaceCreated(holder: SurfaceHolder) {
-                    surfaceReady = true
-                    if (hasVideoTrack && ::player.isInitialized) {
-                        player.setVideoSurfaceView(this@surfaceView)
-                    }
+        val videoSurface = SurfaceView(this)
+        surfaceView = videoSurface
+        videoSurface.visibility = View.GONE
+        videoSurface.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                surfaceReady = true
+                if (hasVideoTrack && ::player.isInitialized) {
+                    player.setVideoSurfaceView(videoSurface)
                 }
+            }
 
-                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                    surfaceReady = true
-                    if (hasVideoTrack && ::player.isInitialized) {
-                        player.setVideoSurfaceView(this@surfaceView)
-                    }
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                surfaceReady = true
+                if (hasVideoTrack && ::player.isInitialized) {
+                    player.setVideoSurfaceView(videoSurface)
                 }
+            }
 
-                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                    surfaceReady = false
-                    if (::player.isInitialized) {
-                        player.clearVideoSurfaceView(this@surfaceView)
-                    }
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                surfaceReady = false
+                if (::player.isInitialized) {
+                    player.clearVideoSurfaceView(videoSurface)
                 }
-            })
-        }
-        root.addView(surfaceView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 420))
+            }
+        })
+        root.addView(videoSurface, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 420))
 
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
