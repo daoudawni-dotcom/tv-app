@@ -76,7 +76,8 @@ class MicActivity : Activity() {
                 android.R.layout.simple_spinner_dropdown_item,
                 labels
             )
-            setSelection(keys.indexOf(prefs.getString("mode", "system")).coerceAtLeast(0))
+            val saved = prefs.getString("mode", "direct") ?: "direct"
+            setSelection(keys.indexOf(saved).coerceAtLeast(0))
         }
         root.addView(mode)
 
